@@ -2929,11 +2929,17 @@
     <div class="toast" id="toast"><span id="toastMsg">Ready</span></div>
 
     <script>
+        let drivers = [];
+        let trucks = [];
+        let orders = [];
+        let jobCards = [];
+        let settings = {};
+
         const App = (function () {
-            let drivers = [];
-            let trucks = [];
-            let orders = [];
-            let jobCards = [];
+            drivers = [];
+            trucks = [];
+            orders = [];
+            jobCards = [];
             let jcPageTab = 'pipeline';
             let jcStatusFilter = 'Draft';
             const DEFAULT_MAINTENANCE_SERVICES = [
@@ -2949,7 +2955,7 @@
             let orderDateFilter = ''; // '', 'today', 'week', 'month', 'year', or 'custom'
             let orderDateRangeStart = '';
             let orderDateRangeEnd = '';
-            let settings = {
+            settings = {
                 theme: 'default',
                 darkMode: true,
                 driverStatuses: [
@@ -3079,13 +3085,26 @@
                 }
             }
 
-            function saveAll() {
-                localStorage.setItem('fg3_drivers', JSON.stringify(drivers));
-                localStorage.setItem('fg3_trucks', JSON.stringify(trucks));
-                localStorage.setItem('fg3_settings', JSON.stringify(settings));
-                localStorage.setItem('fg3_orders', JSON.stringify(orders));
-                localStorage.setItem('fg3_jobcards', JSON.stringify(jobCards));
-            }
+        function saveAll() {
+    // Also keep localStorage as offline fallback
+    localStorage.setItem('fg3_drivers', JSON.stringify(drivers));
+    localStorage.setItem('fg3_trucks', JSON.stringify(trucks));
+    localStorage.setItem('fg3_settings', JSON.stringify(settings));
+    localStorage.setItem('fg3_orders', JSON.stringify(orders));
+    localStorage.setItem('fg3_jobcards', JSON.stringify(jobCards));
+
+    // Sync to Firebase (live for all users)
+    if (typeof database !== 'undefined') {
+        database.ref('fleetguard').set({
+            drivers: drivers,
+            trucks: trucks,
+            settings: settings,
+            orders: orders,
+            jobCards: jobCards,
+            lastUpdated: Date.now()
+        }).catch(err => console.error('Firebase save failed:', err));
+    }
+}
             function generateSalt() {
                 return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
             }
@@ -3272,77 +3291,102 @@
                 }
             }
             function loadAll() {
-                const d = localStorage.getItem('fg3_drivers');
-                if (d) drivers = JSON.parse(d);
-                const t = localStorage.getItem('fg3_trucks');
-                if (t) trucks = JSON.parse(t);
-                const s = localStorage.getItem('fg3_settings');
-                if (s) {
-                    settings = JSON.parse(s);
+    if (typeof database !== 'undefined') {
+        // Load from Firebase first
+        database.ref('fleetguard').once('value').then(snapshot => {
+            const data = snapshot.val();
+            if (data) {
+                if (data.drivers) drivers = data.drivers;
+                if (data.trucks) trucks = data.trucks;
+                if (data.settings) {
+                    settings = data.settings;
                     if (settings.theme === undefined) settings.theme = 'default';
                     if (settings.darkMode === undefined) settings.darkMode = true;
                     if (settings.settingsLocked === undefined) settings.settingsLocked = false;
                 }
-                const o = localStorage.getItem('fg3_orders');
-                if (o) {
-                    try {
-                        orders = JSON.parse(o);
-                    } catch(e) {
-                        orders = [];
-                    }
-                } else {
-                    orders = [];
-                }
-                const jc = localStorage.getItem('fg3_jobcards');
-                if (jc) {
-                    try { jobCards = JSON.parse(jc); } catch (e) { jobCards = []; }
-                }
-                migrateAllJobCards();
-                if (!settings.maintenanceServices || !settings.maintenanceServices.length) {
-                    settings.maintenanceServices = DEFAULT_MAINTENANCE_SERVICES.map(s => ({ ...s }));
-                }
-                // migration
-                drivers.forEach(drv => {
-                    if (!drv.tripsList) drv.tripsList = [];
-                    if (!drv.warningsList) drv.warningsList = [];
-                    if (!drv.suspensionsList) drv.suspensionsList = [];
-                    if (!drv.accidentsList) drv.accidentsList = [];
-                    if (!drv.lossesList) drv.lossesList = [];
-                    if (!drv.trainings) drv.trainings = [];
-                    if (!drv.files) drv.files = [];
-                    if (!drv.documents) drv.documents = [];
-                    if (drv.phone === undefined) drv.phone = '';
-                    if (drv.tripsList.length === 0 && typeof drv.trips === 'number') drv.trips = drv.trips || 0;
-                });
-                trucks.forEach(trk => {
-                    if (!trk.documents) trk.documents = [];
-                    if (!trk.issues) trk.issues = [];
-                    if (!trk.files) trk.files = [];
-                    if (!trk.custom || typeof trk.custom !== 'object') trk.custom = {};
-                    if (!trk.status) trk.status = 'Active';
-                    if (!trk.lastServices) trk.lastServices = {};
-                    if (!trk.maintenanceLog) trk.maintenanceLog = [];
-                });
-                orders.forEach(ord => {
-                    if (!ord.priority) ord.priority = 'Medium';
-                    if (!ord.truckPlate) ord.truckPlate = '';
-                    if (!ord.status) ord.status = 'Pending';
-                    if (!ord.date) ord.date = new Date().toISOString().slice(0, 10);
-                    if (!ord.orderId) ord.orderId = 'ORD-' + (1000 + ord._idx);
-                    if (!ord.assignedTrucks || !Array.isArray(ord.assignedTrucks)) {
-                        ord.assignedTrucks = [];
-                        if (ord.truckPlate) {
-                            ord.assignedTrucks.push({
-                                plate: ord.truckPlate,
-                                status: ord.status === 'At Garage' ? 'Offloaded' : ord.status === 'In Transit' ? 'Transit' : 'allocated',
-                                active: true
-                            });
-                        }
-                    }
-                    ord.status = deriveOrderStatus(ord);
-                });
-                applyTheme();
+                if (data.orders) orders = data.orders;
+                if (data.jobCards) jobCards = data.jobCards;
+            } else {
+                // No Firebase data yet — load from localStorage (first time migration)
+                _loadFromLocalStorage();
+                saveAll(); // push localStorage data up to Firebase
             }
+            _afterLoad();
+        }).catch(err => {
+            console.warn('Firebase load failed, falling back to localStorage', err);
+            _loadFromLocalStorage();
+            _afterLoad();
+        });
+    } else {
+        _loadFromLocalStorage();
+        _afterLoad();
+    }
+}
+
+function _loadFromLocalStorage() {
+    const d = localStorage.getItem('fg3_drivers');
+    if (d) drivers = JSON.parse(d);
+    const t = localStorage.getItem('fg3_trucks');
+    if (t) trucks = JSON.parse(t);
+    const s = localStorage.getItem('fg3_settings');
+    if (s) {
+        settings = JSON.parse(s);
+        if (settings.theme === undefined) settings.theme = 'default';
+        if (settings.darkMode === undefined) settings.darkMode = true;
+        if (settings.settingsLocked === undefined) settings.settingsLocked = false;
+    }
+    const o = localStorage.getItem('fg3_orders');
+    if (o) { try { orders = JSON.parse(o); } catch(e) { orders = []; } } else { orders = []; }
+    const jc = localStorage.getItem('fg3_jobcards');
+    if (jc) { try { jobCards = JSON.parse(jc); } catch (e) { jobCards = []; } }
+}
+
+function _afterLoad() {
+    migrateAllJobCards();
+    if (!settings.maintenanceServices || !settings.maintenanceServices.length) {
+        settings.maintenanceServices = DEFAULT_MAINTENANCE_SERVICES.map(s => ({ ...s }));
+    }
+    drivers.forEach(drv => {
+        if (!drv.tripsList) drv.tripsList = [];
+        if (!drv.warningsList) drv.warningsList = [];
+        if (!drv.suspensionsList) drv.suspensionsList = [];
+        if (!drv.accidentsList) drv.accidentsList = [];
+        if (!drv.lossesList) drv.lossesList = [];
+        if (!drv.trainings) drv.trainings = [];
+        if (!drv.files) drv.files = [];
+        if (!drv.documents) drv.documents = [];
+        if (drv.phone === undefined) drv.phone = '';
+        if (drv.tripsList.length === 0 && typeof drv.trips === 'number') drv.trips = drv.trips || 0;
+    });
+    trucks.forEach(trk => {
+        if (!trk.documents) trk.documents = [];
+        if (!trk.issues) trk.issues = [];
+        if (!trk.files) trk.files = [];
+        if (!trk.custom || typeof trk.custom !== 'object') trk.custom = {};
+        if (!trk.status) trk.status = 'Active';
+        if (!trk.lastServices) trk.lastServices = {};
+        if (!trk.maintenanceLog) trk.maintenanceLog = [];
+    });
+    orders.forEach(ord => {
+        if (!ord.priority) ord.priority = 'Medium';
+        if (!ord.truckPlate) ord.truckPlate = '';
+        if (!ord.status) ord.status = 'Pending';
+        if (!ord.date) ord.date = new Date().toISOString().slice(0, 10);
+        if (!ord.orderId) ord.orderId = 'ORD-' + (1000 + ord._idx);
+        if (!ord.assignedTrucks || !Array.isArray(ord.assignedTrucks)) {
+            ord.assignedTrucks = [];
+            if (ord.truckPlate) {
+                ord.assignedTrucks.push({
+                    plate: ord.truckPlate,
+                    status: ord.status === 'At Garage' ? 'Offloaded' : ord.status === 'In Transit' ? 'Transit' : 'allocated',
+                    active: true
+                });
+            }
+        }
+        ord.status = deriveOrderStatus(ord);
+    });
+    applyTheme();
+}
 
             function palette(i) { return PALETTES[i % PALETTES.length]; }
             function initials(name) { return (name || '?').trim().split(/\s+/).map(p => p[0] || '').join('').toUpperCase().slice(0, 2) || '?'; }
@@ -9073,6 +9117,7 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
                 filterTruckList, toggleAllTrucks, updateTruckSelectionCount,
                 renameAttachment,
                 scrollToViolationCard,
+                refreshAllViews,
                 setFgRole, setJcStatusFilter, setJcPageTab, renderJobCardsPage, startJobCardForTruck,
                 openCreateJobCardModal, openEditJobCardModal, updateJobCard, updateJobCardAndSubmit,
                 addJobCardLineRow, onJcLineServiceChange, saveJobCard,
@@ -9082,6 +9127,7 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
                 init, showToast
             };
         })();
+
         // expose App to window so inline handlers (onclick="App...") work
         try { window.App = App; } catch (e) { /* ignore */ }
 
@@ -9110,6 +9156,33 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
   const database = firebase.database();
   
   console.log("Firebase Database is ready to sync!");
+
+
+  // ── LIVE SYNC LISTENER ──
+// Once Firebase is ready, listen for any changes from other users
+database.ref('fleetguard').on('value', snapshot => {
+    const data = snapshot.val();
+    if (!data) return;
+
+    // Don't overwrite with stale data if this browser just saved
+    if (data.drivers) drivers = data.drivers;
+    if (data.trucks) trucks = data.trucks;
+    if (data.orders) orders = data.orders;
+    if (data.jobCards) jobCards = data.jobCards;
+    if (data.settings) settings = data.settings;
+
+    // Also cache locally
+    localStorage.setItem('fg3_drivers', JSON.stringify(drivers));
+    localStorage.setItem('fg3_trucks', JSON.stringify(trucks));
+    localStorage.setItem('fg3_settings', JSON.stringify(settings));
+    localStorage.setItem('fg3_orders', JSON.stringify(orders));
+    localStorage.setItem('fg3_jobcards', JSON.stringify(jobCards));
+
+    // Refresh the current page view
+    if (typeof App !== 'undefined' && App.init) {
+        try { App.refreshAllViews && App.refreshAllViews(); } catch(e) {}
+    }
+});
 </script>
 </body>
 
