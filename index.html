@@ -5,6 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FleetGuard — Driver & Truck Command Center</title>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <link
         href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;600;700&family=DM+Sans:wght@300;400;500;600&display=swap"
         rel="stylesheet">
@@ -3290,7 +3292,8 @@
                     showToast('Backup restore failed');
                 }
             }
-            function loadAll() {
+            function loadAll(callback) {
+    callback = callback || function(){};
     if (typeof database !== 'undefined') {
         // Load from Firebase first
         database.ref('fleetguard').once('value').then(snapshot => {
@@ -3309,17 +3312,36 @@
             } else {
                 // No Firebase data yet — load from localStorage (first time migration)
                 _loadFromLocalStorage();
-                saveAll(); // push localStorage data up to Firebase
+                if (drivers.length === 0 && trucks.length === 0) {
+                    loadDemoData();
+                } else {
+                    saveAll(); // push localStorage data up to Firebase
+                }
             }
+
+            // Stronger fallback: if Firebase/live data contains no fleet records, load demo data.
+            if (drivers.length === 0 && trucks.length === 0 && orders.length === 0 && jobCards.length === 0) {
+                loadDemoData();
+            }
+
             _afterLoad();
+            callback();
         }).catch(err => {
             console.warn('Firebase load failed, falling back to localStorage', err);
             _loadFromLocalStorage();
+            if (drivers.length === 0 && trucks.length === 0) {
+                loadDemoData();
+            }
             _afterLoad();
+            callback();
         });
     } else {
         _loadFromLocalStorage();
+        if (drivers.length === 0 && trucks.length === 0) {
+            loadDemoData();
+        }
         _afterLoad();
+        callback();
     }
 }
 
@@ -3341,11 +3363,46 @@ function _loadFromLocalStorage() {
     if (jc) { try { jobCards = JSON.parse(jc); } catch (e) { jobCards = []; } }
 }
 
-function _afterLoad() {
-    migrateAllJobCards();
-    if (!settings.maintenanceServices || !settings.maintenanceServices.length) {
+function ensureSettingsDefaults() {
+    settings = settings || {};
+    if (settings.theme === undefined) settings.theme = 'default';
+    if (settings.darkMode === undefined) settings.darkMode = true;
+    if (settings.settingsLocked === undefined) settings.settingsLocked = false;
+    if (!Array.isArray(settings.driverStatuses)) {
+        settings.driverStatuses = [
+            { name: 'Online', color: '#22c97a' },
+            { name: 'Offline', color: '#565b6e' },
+            { name: 'On Trip', color: '#3d7fff' },
+            { name: 'Idle', color: '#f59e0b' },
+            { name: 'Suspended', color: '#f04c5a' }
+        ];
+    }
+    if (!Array.isArray(settings.violationTypes)) {
+        settings.violationTypes = [
+            { name: 'Speeding', severity: 'high' },
+            { name: 'Phone use', severity: 'medium' },
+            { name: 'Hard braking', severity: 'low' }
+        ];
+    }
+    if (settings.riskMediumThreshold === undefined) settings.riskMediumThreshold = 10;
+    if (settings.riskHighThreshold === undefined) settings.riskHighThreshold = 24;
+    if (settings.riskHighCountThreshold === undefined) settings.riskHighCountThreshold = 2;
+    if (!Array.isArray(settings.docTypes)) {
+        settings.docTypes = [
+            { name: 'Insurance', months: 12 },
+            { name: 'Registration', months: 12 },
+            { name: 'Inspection', months: 6 }
+        ];
+    }
+    if (!Array.isArray(settings.customFields)) settings.customFields = [];
+    if (!Array.isArray(settings.maintenanceServices) || !settings.maintenanceServices.length) {
         settings.maintenanceServices = DEFAULT_MAINTENANCE_SERVICES.map(s => ({ ...s }));
     }
+}
+
+function _afterLoad() {
+    migrateAllJobCards();
+    ensureSettingsDefaults();
     drivers.forEach(drv => {
         if (!drv.tripsList) drv.tripsList = [];
         if (!drv.warningsList) drv.warningsList = [];
@@ -3472,6 +3529,7 @@ function _afterLoad() {
             }
 
             function showPage(page) {
+                ensureSettingsDefaults();
                 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
                 document.querySelectorAll('.nav-item[data-page]').forEach(n => n.classList.remove('active'));
                 const pg = document.getElementById('page-' + page);
@@ -3820,8 +3878,11 @@ function _afterLoad() {
 
             // ═══════════ DRIVERS ═══════════
             function populateDriverFilters() {
-                document.getElementById('driverStatusFilter').innerHTML = '<option value="">All statuses</option>' +
-                    settings.driverStatuses.map(s => `<option value="${normStatus(s.name)}">${s.name}</option>`).join('');
+                const statuses = Array.isArray(settings.driverStatuses) ? settings.driverStatuses : [];
+                const filterEl = document.getElementById('driverStatusFilter');
+                if (!filterEl) return;
+                filterEl.innerHTML = '<option value="">All statuses</option>' +
+                    statuses.map(s => `<option value="${normStatus(s.name)}">${s.name}</option>`).join('');
             }
             function renderDriverMetrics() {
                 const online = drivers.filter(d => ['online', 'on-trip', 'on trip'].includes((d.status || '').toLowerCase())).length;
@@ -4757,8 +4818,10 @@ function _afterLoad() {
 
             // ═══════════ VIOLATIONS ═══════════
             function populateViolationFilters() {
-                const types = [...new Set(settings.violationTypes.map(v => v.name))];
-                document.getElementById('violationTypeFilter').innerHTML = '<option value="">All types</option>' +
+                const types = [...new Set((Array.isArray(settings.violationTypes) ? settings.violationTypes : []).map(v => v.name))];
+                const filterEl = document.getElementById('violationTypeFilter');
+                if (!filterEl) return;
+                filterEl.innerHTML = '<option value="">All types</option>' +
                     types.map(t => `<option value="${t}">${t}</option>`).join('');
             }
             function renderViolationMetrics() {
@@ -4854,20 +4917,39 @@ function _afterLoad() {
 
             // ═══════════ SETTINGS ═══════════
             function renderSettings() {
-                if (document.getElementById('settingTheme')) document.getElementById('settingTheme').value = settings.theme || 'default';
-                if (document.getElementById('settingDarkMode')) document.getElementById('settingDarkMode').value = settings.darkMode === false ? 'false' : 'true';
-                document.getElementById('settingStatusChips').innerHTML = settings.driverStatuses.map((s, i) => `
-            <span class="chip"><span style="width:8px;height:8px;border-radius:50%;background:${s.color};display:inline-block"></span>${s.name}
-            <span class="chip-remove" onclick="App.removeDriverStatus(${i})">✕</span></span>`).join('');
-                document.getElementById('settingViolationChips').innerHTML = settings.violationTypes.map((v, i) => `
-            <span class="chip severity-${v.severity}">${v.name} <span style="font-size:9px">[${v.severity}]</span>
-            <span class="chip-remove" onclick="App.removeViolationType(${i})">✕</span></span>`).join('');
-                document.getElementById('settingDocTypeChips').innerHTML = settings.docTypes.map((d, i) => `
-            <span class="chip">📄 ${d.name} <span style="font-size:9px">(${d.months}mo)</span>
-            <span class="chip-remove" onclick="App.removeDocType(${i})">✕</span></span>`).join('');
-                document.getElementById('settingCustomFieldChips').innerHTML = settings.customFields.map((f, i) => `
-            <span class="chip">${f.target === 'driver' ? '👤' : '🚛'} ${f.name}
-            <span class="chip-remove" onclick="App.removeCustomField(${i})">✕</span></span>`).join('');
+                settings = settings || {};
+                const themeInput = document.getElementById('settingTheme');
+                const darkModeInput = document.getElementById('settingDarkMode');
+                const statusChips = document.getElementById('settingStatusChips');
+                const violationChips = document.getElementById('settingViolationChips');
+                const docTypeChips = document.getElementById('settingDocTypeChips');
+                const customFieldChips = document.getElementById('settingCustomFieldChips');
+                if (themeInput) themeInput.value = settings.theme || 'default';
+                if (darkModeInput) darkModeInput.value = settings.darkMode === false ? 'false' : 'true';
+                const statusList = Array.isArray(settings.driverStatuses) ? settings.driverStatuses : [];
+                const violationList = Array.isArray(settings.violationTypes) ? settings.violationTypes : [];
+                const docTypeList = Array.isArray(settings.docTypes) ? settings.docTypes : [];
+                const customFieldList = Array.isArray(settings.customFields) ? settings.customFields : [];
+                if (statusChips) {
+                    statusChips.innerHTML = statusList.map((s, i) => `
+                <span class="chip"><span style="width:8px;height:8px;border-radius:50%;background:${s.color};display:inline-block"></span>${s.name}
+                <span class="chip-remove" onclick="App.removeDriverStatus(${i})">✕</span></span>`).join('');
+                }
+                if (violationChips) {
+                    violationChips.innerHTML = violationList.map((v, i) => `
+                <span class="chip severity-${v.severity}">${v.name} <span style="font-size:9px">[${v.severity}]</span>
+                <span class="chip-remove" onclick="App.removeViolationType(${i})">✕</span></span>`).join('');
+                }
+                if (docTypeChips) {
+                    docTypeChips.innerHTML = docTypeList.map((d, i) => `
+                <span class="chip">📄 ${d.name} <span style="font-size:9px">(${d.months}mo)</span>
+                <span class="chip-remove" onclick="App.removeDocType(${i})">✕</span></span>`).join('');
+                }
+                if (customFieldChips) {
+                    customFieldChips.innerHTML = customFieldList.map((f, i) => `
+                <span class="chip">${f.target === 'driver' ? '👤' : '🚛'} ${f.name}
+                <span class="chip-remove" onclick="App.removeCustomField(${i})">✕</span></span>`).join('');
+                }
                 renderMaintenanceServices();
                 updateAdminSectionUI();
             }
@@ -6304,6 +6386,24 @@ function _afterLoad() {
 
             function refreshAllViews() {
                 showPage(getActivePage());
+            }
+
+            function refreshFromFirebase(data) {
+                // Update global state from Firebase data
+                if (!data) return;
+                if (data.drivers) drivers = data.drivers;
+                if (data.trucks) trucks = data.trucks;
+                if (data.orders) orders = data.orders;
+                if (data.jobCards) jobCards = data.jobCards;
+                if (data.settings) settings = data.settings;
+                // Also cache locally
+                localStorage.setItem('fg3_drivers', JSON.stringify(drivers));
+                localStorage.setItem('fg3_trucks', JSON.stringify(trucks));
+                localStorage.setItem('fg3_settings', JSON.stringify(settings));
+                localStorage.setItem('fg3_orders', JSON.stringify(orders));
+                localStorage.setItem('fg3_jobcards', JSON.stringify(jobCards));
+                // Refresh the current page view
+                refreshAllViews();
             }
 
             function openImportUpdatesModal() {
@@ -7817,24 +7917,27 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
             // ═════════════════════════════════════════════
 
             function init() {
-                loadAll();
-                if (drivers.length === 0 && trucks.length === 0) loadDemoData();
-                document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-                    item.addEventListener('click', e => {
-                        e.preventDefault();
-                        showPage(item.dataset.page);
+                ensureSettingsDefaults();
+                loadAll(function() {
+                    // This callback runs AFTER data is loaded (from Firebase or localStorage)
+                    if (drivers.length === 0 && trucks.length === 0) loadDemoData();
+                    document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+                        item.addEventListener('click', e => {
+                            e.preventDefault();
+                            showPage(item.dataset.page);
+                        });
                     });
+                    const pageSettings = document.getElementById('page-settings');
+                    if (pageSettings) {
+                        pageSettings.addEventListener('click', e => {
+                            if (!settings.settingsLocked) return;
+                            if (e.target.closest('#adminPinButton, #restoreBackupButton, #settingsLockButton')) return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                        });
+                    }
+                    showPage('dashboard');
                 });
-                const pageSettings = document.getElementById('page-settings');
-                if (pageSettings) {
-                    pageSettings.addEventListener('click', e => {
-                        if (!settings.settingsLocked) return;
-                        if (e.target.closest('#adminPinButton, #restoreBackupButton, #settingsLockButton')) return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                    });
-                }
-                showPage('dashboard');
             }
 
             function scrollToViolationCard(typeName) {
@@ -9117,7 +9220,7 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
                 filterTruckList, toggleAllTrucks, updateTruckSelectionCount,
                 renameAttachment,
                 scrollToViolationCard,
-                refreshAllViews,
+                refreshAllViews, refreshFromFirebase,
                 setFgRole, setJcStatusFilter, setJcPageTab, renderJobCardsPage, startJobCardForTruck,
                 openCreateJobCardModal, openEditJobCardModal, updateJobCard, updateJobCardAndSubmit,
                 addJobCardLineRow, onJcLineServiceChange, saveJobCard,
@@ -9133,54 +9236,40 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
 
         document.addEventListener('DOMContentLoaded', () => App.init());
     </script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
 
 <script>
-  // 2. Your exact web app's Firebase configuration
-  const firebaseConfig = {
-    apiKey: "AIzaSyCY2Jk5foZA4fUE29cc63KuiaU0J9K6X50",
-    authDomain: "washly-3101b.firebaseapp.com",
-    // Note: If your database is in a European or Asian server, you may need 
-    // to copy the exact databaseURL from your Firebase console here.
-    databaseURL: "https://washly-3101b-default-rtdb.firebaseio.com", 
-    projectId: "washly-3101b",
-    storageBucket: "washly-3101b.firebasestorage.app",
-    messagingSenderId: "330537104056",
-    appId: "1:330537104056:web:a617045bbbcfc3515bfa4d",
-    measurementId: "G-1L9QP3XP6K"
+  var firebaseConfig = {
+    apiKey: "AIzaSyAilKo_Lc2SWlxDrRQrzjHhqrf6oH0k824",
+    authDomain: "rag-os-e9382.firebaseapp.com",
+    databaseURL: "https://rag-os-e9382-default-rtdb.firebaseio.com",
+    projectId: "rag-os-e9382",
+    storageBucket: "rag-os-e9382.firebasestorage.app",
+    messagingSenderId: "522385154864",
+    appId: "1:522385154864:web:1af1905244f3b7144b9ef5",
+    measurementId: "G-D5FD4ZNBCF"
   };
 
-  // 3. Initialize Firebase globally so your entire file can see it
   firebase.initializeApp(firebaseConfig);
-  const database = firebase.database();
-  
-  console.log("Firebase Database is ready to sync!");
+  window.database = firebase.database();
 
+  console.log("[Firebase] Realtime Database connected — project: rag-os-e9382");
 
   // ── LIVE SYNC LISTENER ──
 // Once Firebase is ready, listen for any changes from other users
+// Add a delay to prevent firing during initial page load (when init() is still running)
+let _appReady = false;
+setTimeout(() => { _appReady = true; }, 3000);
+
 database.ref('fleetguard').on('value', snapshot => {
+    // Skip the initial fire during app startup
+    if (!_appReady) return;
+    
     const data = snapshot.val();
     if (!data) return;
 
-    // Don't overwrite with stale data if this browser just saved
-    if (data.drivers) drivers = data.drivers;
-    if (data.trucks) trucks = data.trucks;
-    if (data.orders) orders = data.orders;
-    if (data.jobCards) jobCards = data.jobCards;
-    if (data.settings) settings = data.settings;
-
-    // Also cache locally
-    localStorage.setItem('fg3_drivers', JSON.stringify(drivers));
-    localStorage.setItem('fg3_trucks', JSON.stringify(trucks));
-    localStorage.setItem('fg3_settings', JSON.stringify(settings));
-    localStorage.setItem('fg3_orders', JSON.stringify(orders));
-    localStorage.setItem('fg3_jobcards', JSON.stringify(jobCards));
-
-    // Refresh the current page view
-    if (typeof App !== 'undefined' && App.init) {
-        try { App.refreshAllViews && App.refreshAllViews(); } catch(e) {}
+    // Use the new refreshFromFirebase method from the App module
+    if (typeof App !== 'undefined' && App.refreshFromFirebase) {
+        try { App.refreshFromFirebase(data); } catch(e) { console.warn('Sync error:', e); }
     }
 });
 </script>
